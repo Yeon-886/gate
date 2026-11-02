@@ -33,6 +33,24 @@ edgetunnel 后台「自定义优选IP」框填 https://…/nodes.txt
 
 ---
 
+## 此 Fork 的必填配置：CHECK_WORKER
+
+此仓库已经支持在 GitHub Actions 中读取检测 Worker 地址，不要再把 `https://你的域名/...` 作为实际地址。
+
+1. 先将 [lsh8848/cm-Workers-CheckSocks5](https://github.com/lsh8848/cm-Workers-CheckSocks5) 的 `_worker.js` **单独部署为 Cloudflare Worker**；原有 edgetunnel Worker 不能直接替代检测 Worker。
+2. 到本仓库 **Settings → Secrets and variables → Actions → Variables → New repository variable**，创建：
+   - **Name**：`CHECK_WORKER`
+   - **Value**：`https://你的真实检测Worker域名/check?sstp=vpn:vpn@`
+   - 例如：`https://gate-check.example.workers.dev/check?sstp=vpn:vpn@`（仅格式示例，并非真实服务）
+3. 打开 **Actions → VPN Gate Node Check → Run workflow** 手动测试。工作流支持 `check_worker` 临时输入；但定时运行只使用仓库变量 `CHECK_WORKER`。
+4. 完成配置后，每 30 分钟会尝试运行一次检测（GitHub Actions 的 cron 不保证准点）。未配置变量时自动任务跳过，而不是对无效地址反复检测。
+5. 检测成功并部署 Pages 后，打开本仓库的节点地址：
+   `https://Yeon-886.github.io/gate/nodes.txt`
+
+如果日志提示 `CHECK_WORKER 未配置或格式不正确`，检查变量名称、检测 Worker 地址和 `/check?sstp=vpn:vpn@` 后缀。该接口应返回含 `success` 字段的 JSON，而不是 edgetunnel 的网页。
+
+---
+
 ## 一、完整部署教程（从零开始）
 
 ### 前置条件
@@ -72,7 +90,7 @@ edgetunnel 后台「自定义优选IP」框填 https://…/nodes.txt
 
 | 文件 | 位置 | 改成什么 | 为什么 |
 | :--- | :--- | :--- | :--- |
-| .github/workflows/check.yml | env 里的 `CHECK_WORKER` | 你的检测 Worker 域名，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` | 检测统一走你自己的 Worker |
+| 仓库 Settings → Actions → Variables | `CHECK_WORKER` | 你的检测 Worker URL，形如 `https://xxx.workers.dev/check?sstp=vpn:vpn@` | 供定时运行使用，无需编辑工作流 |
 | vpngate.py | `NODES_URL` | 把里面写死的固定地址换成 `你的用户名/仓库名` | 自动更新时用到的固定地址 |
 
 > **注意**：`vpngate.py` 中**不需要**配置 `EDT_UUID` 和 `EDT_DOMAIN`。你之前看到的这两个变量是旧版遗留，现已删除。edgetunnel 后台会自己处理 UUID 和域名。
