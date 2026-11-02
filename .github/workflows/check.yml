@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       check_worker:
-        description: "可选：本次运行使用的检测 Worker URL；定时运行请设置仓库变量 CHECK_WORKER"
+        description: "可选：覆盖检测 Worker 地址；留空使用仓库变量或已配置的默认地址"
         required: false
         type: string
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check.yml'
+      - 'vpngate.py'
   schedule:
     - cron: "17,47 * * * *"
 
@@ -21,11 +26,13 @@ concurrency:
 
 jobs:
   check:
-    # 定时任务在配置好 CHECK_WORKER 前不会执行检测
-    if: ${{ github.event_name != 'schedule' || vars.CHECK_WORKER != '' }}
     env:
-      CHECK_WORKER: ${{ github.event.inputs.check_worker || vars.CHECK_WORKER }}
+      # 公开检测服务地址，不是令牌。临时输入和仓库变量仍可覆盖默认值。
+      CHECK_WORKER: ${{ github.event.inputs.check_worker || vars.CHECK_WORKER || 'https://cm-workers-checksocks5.asfhjbcueirew.workers.dev/check?sstp=vpn:vpn@' }}
       NODES_URL: "https://Yeon-886.github.io/gate/nodes.txt"
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -40,22 +47,68 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Validate SSTP detection Worker URL
+      - name: Validate and probe SSTP detection Worker
         run: |
           python - <<'PY'
           import os
-          from urllib.parse import urlsplit
-          url = os.environ.get("CHECK_WORKER", "").strip()
-          try:
-              parsed = urlsplit(url)
+          from urllib.parse import urlsplit, urlunsplit
+          import requests
+
+          def normalize_worker(value):
+              value = value.strip()
+              if not value or any(c in value for c in "\r\n"):
+                  raise ValueError("CHECK_WORKER 为空或包含换行")
+              if "://" not in value:
+                  value = "https://" + value
+              parsed = urlsplit(value)
+              if parsed.path in ("", "/") and not parsed.query:
+                  parsed = parsed._replace(path="/check", query="sstp=vpn:vpn@")
               host = parsed.hostname or ""
-          except ValueError:
-              parsed, host = None, ""
-          if (not parsed or parsed.scheme != "https" or "." not in host
-                  or "你的域名" in host or parsed.path != "/check"
-                  or parsed.query != "sstp=vpn:vpn@"):
-              raise SystemExit("::error::CHECK_WORKER 未配置或格式不正确。请先部署 CheckSocks5 Worker，并在仓库 Settings > Secrets and variables > Actions > Variables 设置 CHECK_WORKER，例如 https://your-checker.workers.dev/check?sstp=vpn:vpn@。手动运行也可以填写 check_worker 输入参数。")
-          print("CHECK_WORKER 格式检查通过")
+              if (parsed.scheme != "https" or "." not in host
+                      or "你的域名" in host or parsed.username is not None
+                      or parsed.password is not None or parsed.fragment
+                      or parsed.path != "/check"
+                      or parsed.query != "sstp=vpn:vpn@"):
+                  raise ValueError("请填写检测 Worker 域名或完整的 /check?sstp=vpn:vpn@ 地址")
+              return urlunsplit(parsed)
+
+          def main():
+              try:
+                  url = normalize_worker(os.environ.get("CHECK_WORKER", ""))
+              except ValueError as exc:
+                  print(f"::error::{exc}")
+                  raise SystemExit(1)
+              probe = urlunsplit(urlsplit(url)._replace(query=""))
+              print(f"检测接口预检: {probe}")
+              try:
+                  response = requests.get(probe, timeout=20, allow_redirects=False)
+              except requests.RequestException as exc:
+                  print(f"::error::检测 Worker 无法访问: {type(exc).__name__}")
+                  raise SystemExit(1)
+              try:
+                  payload = response.json()
+              except ValueError:
+                  payload = {}
+              # 不连接任何 VPN：缺少参数时，正确的检测代码返回带 SSTP 提示的 400 JSON。
+              error = str(payload.get("error", "")) if isinstance(payload, dict) else ""
+              valid = (response.status_code == 400 and isinstance(payload, dict)
+                       and payload.get("success") is False
+                       and "missing proxy parameter" in error.lower()
+                       and "sstp" in error.lower())
+              if not valid:
+                  print(f"Worker HTTP 状态: {response.status_code}")
+                  print("响应片段: " + repr(response.text[:300]))
+                  if response.status_code == 404:
+                      print("::error::检测 Worker 返回 404；不是 CHECK_WORKER 变量格式错误。请在 Cloudflare 确认 cm-workers-checksocks5 已部署 _worker.js 且 workers.dev 路由启用；仓库 wrangler.toml 的 name 必须匹配该 Worker。")
+                  else:
+                      print("::error::该地址未返回预期的 SSTP 检测 API。检查生产部署、访问控制和 _worker.js 入口。")
+                  raise SystemExit(1)
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+                  output.write("CHECK_WORKER=" + url + "\n")
+              print("SSTP 检测接口可访问；继续实际节点检测。")
+
+          if __name__ == "__main__":
+              main()
           PY
 
       - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
@@ -64,9 +117,14 @@ jobs:
           CHECK_CONCURRENCY: "32"
           CHECK_TIMEOUT: "90"
 
+      - name: Verify non-empty SSTP node output
+        run: |
+          if ! grep -q '\$sstp://' public/nodes.txt; then
+            echo "::error::没有检测成功的 SSTP 节点，保留上次发布结果，不部署空清单。"
+            exit 1
+          fi
+
       - name: Verify GitHub Pages is enabled
-        # Creating a Pages site via REST requires Administration:write;
-        # GITHUB_TOKEN's Pages:write permission alone is insufficient.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
