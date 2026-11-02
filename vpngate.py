@@ -21,7 +21,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -468,7 +468,26 @@ def write_outputs(data, edge_hosts):
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+def validate_check_worker_url():
+    """检测 Worker 必须是独立的 SSTP 检测服务，不能使用 edgetunnel 地址。"""
+    url = WORKER_CHECK_URL.strip()
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname or ""
+    except ValueError:
+        parsed, hostname = None, ""
+    if (not parsed or parsed.scheme != "https" or "." not in hostname
+            or "你的域名" in hostname or parsed.path != "/check"
+            or parsed.query != "sstp=vpn:vpn@"):
+        die(
+            "CHECK_WORKER 未配置或格式不正确。请部署 "
+            "lsh8848/cm-Workers-CheckSocks5，并设置 "
+            "CHECK_WORKER=https://your-checker.workers.dev/check?sstp=vpn:vpn@"
+        )
+
+
 def main():
+    validate_check_worker_url()
     session = requests.Session()
     rows, source = fetch_vpngate()
     raw_count = len(rows)
@@ -500,6 +519,11 @@ def main():
     log("CLOUDFLARE WORKER", f"检测成功: {len(success)}")
     log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
     log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
+    if worker_errors:
+        for sample in worker_errors[:3]:
+            message = str(sample.get("error") or "unknown error")
+            message = message.replace(WORKER_CHECK_URL, "[CHECK_WORKER]")
+            log("CLOUDFLARE WORKER", f"Worker 错误示例: {message[:220]}")
 
     if uniq and not success and len(worker_errors) == len(uniq):
         die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
