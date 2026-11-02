@@ -64,24 +64,27 @@ jobs:
           CHECK_CONCURRENCY: "32"
           CHECK_TIMEOUT: "90"
 
-      - name: Ensure GitHub Pages is enabled (one-time auto setup)
-        run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
-          echo "Pages API status: $code"
-          if [ "$code" = "404" ]; then
-            echo "首次运行: 启用 GitHub Pages (source = GitHub Actions, 目录 /public)"
-            curl -sS -X PUT \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"build_type":"workflow","source":{"branches":["main"],"path":"/public"}}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/pages"
-            echo
-            sleep 10
-          fi
+      - name: Verify GitHub Pages is enabled
+        # Creating a Pages site via REST requires Administration:write;
+        # GITHUB_TOKEN's Pages:write permission alone is insufficient.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          response_file=$(mktemp)
+          status=$(curl -sS -o "$response_file" -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/pages")
+          echo "GitHub Pages API status: $status"
+          if [ "$status" = "404" ]; then
+            echo "::error::GitHub Pages 尚未启用。请打开仓库 Settings > Pages > Build and deployment，将 Source 设置为 GitHub Actions，再重新运行工作流。"
+            exit 1
+          elif [ "$status" != "200" ]; then
+            cat "$response_file"
+            echo "::error::GitHub Pages 状态检查失败 (HTTP $status)。"
+            exit 1
+          fi
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
